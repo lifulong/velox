@@ -113,6 +113,9 @@ class ParquetData : public dwio::common::FormatData {
     presetNulls_ = nulls;
     presetNullsSize_ = numValues;
     presetNullsConsumed_ = 0;
+    if (nulls) {
+      nulls->setSize(bits::nbytes(numValues));
+    }
   }
 
   int32_t presetNullsLeft() const {

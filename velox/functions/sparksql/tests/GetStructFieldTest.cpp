@@ -18,6 +18,8 @@
 
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/core/Expressions.h"
+#include "velox/expression/EvalCtx.h"
+#include "velox/expression/ExprSet.h"
 #include "velox/functions/sparksql/tests/SparkFunctionBaseTest.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
 
@@ -113,6 +115,71 @@ TEST_F(GetStructFieldTest, invalidOrdinal) {
       testGetStructField(data, 4, colString),
       fmt::format(
           "(4 vs. 3) Invalid ordinal. Should be smaller than the children size of input row vector."));
+}
+
+TEST_F(GetStructFieldTest, reusedResultMergesIntoExistingVector) {
+  auto colInt = makeFlatVector<int32_t>({1, 2, 3, 4});
+  auto colString = makeNullableFlatVector<std::string>(
+      {"hello", "world", std::nullopt, "hi"});
+  auto colIntWithNull =
+      makeNullableFlatVector<int32_t>({11, std::nullopt, 13, 14});
+  auto data = makeRowVector({colInt, colString, colIntWithNull});
+  // Batch row must wrap the struct in one column so FieldReference "c0" is the
+  // ROW vector, matching evaluate(expr, makeRowVector({input})) in testGetStructField.
+  auto inputRow = makeRowVector({data});
+
+  auto typedExpr = std::make_shared<const core::CallTypedExpr>(
+      colInt->type(),
+      "get_struct_field",
+      std::make_shared<const core::FieldAccessTypedExpr>(data->type(), "c0"),
+      std::make_shared<core::ConstantTypedExpr>(INTEGER(), variant(0)));
+
+  exec::ExprSet exprSet({typedExpr}, &execCtx_);
+  exec::EvalCtx context(&execCtx_, &exprSet, inputRow.get());
+
+  std::vector<VectorPtr> results(1);
+  results[0] = makeFlatVector<int32_t>({101, 102, 103, 104});
+
+  SelectivityVector rows(data->size(), false);
+  rows.setValid(2, true);
+  rows.updateBounds();
+
+  exprSet.eval(rows, context, results);
+
+  auto expected = makeFlatVector<int32_t>({101, 102, 3, 104});
+  assertEqualVectors(expected, results[0]);
+}
+
+TEST_F(GetStructFieldTest, reusedResultMultiplePartialEvals) {
+  auto colInt = makeFlatVector<int32_t>({10, 20, 30, 40});
+  auto data = makeRowVector({colInt});
+  auto inputRow = makeRowVector({data});
+
+  auto typedExpr = std::make_shared<const core::CallTypedExpr>(
+      colInt->type(),
+      "get_struct_field",
+      std::make_shared<const core::FieldAccessTypedExpr>(data->type(), "c0"),
+      std::make_shared<core::ConstantTypedExpr>(INTEGER(), variant(0)));
+
+  exec::ExprSet exprSet({typedExpr}, &execCtx_);
+  exec::EvalCtx context(&execCtx_, &exprSet, inputRow.get());
+
+  std::vector<VectorPtr> results(1);
+  results[0] = makeFlatVector<int32_t>({0, 0, 0, 0});
+
+  SelectivityVector rows1(data->size(), false);
+  rows1.setValid(0, true);
+  rows1.setValid(3, true);
+  rows1.updateBounds();
+  exprSet.eval(rows1, context, results);
+
+  SelectivityVector rows2(data->size(), false);
+  rows2.setValid(1, true);
+  rows2.setValid(2, true);
+  rows2.updateBounds();
+  exprSet.eval(rows2, context, results);
+
+  assertEqualVectors(colInt, results[0]);
 }
 
 } // namespace

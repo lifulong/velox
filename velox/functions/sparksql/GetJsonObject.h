@@ -18,6 +18,8 @@
 
 #include <folly/Likely.h>
 #include <cstring>
+#include <string>
+#include <vector>
 
 #include "velox/core/QueryConfig.h"
 #include "velox/functions/Macros.h"
@@ -166,10 +168,23 @@ class JsonPathNormalizer {
   State state_{State::kAfterDollar};
 };
 
+// Array wildcard '[*]' only (Spark-style). Selects at_path_with_wildcard vs at_path
+// without scanning the JSON payload. Object-key '.*' is not treated as a wildcard here.
+inline bool jsonPathContainsWildcard(std::string_view path) {
+  for (size_t i = 0; i + 2 < path.size(); ++i) {
+    if (path[i] == '[' && path[i + 1] == '*' && path[i + 2] == ']') {
+      return true;
+    }
+  }
+  return false;
+}
+
 } // namespace detail
 
 /// Parses a JSON string and returns the value at the specified path.
-/// Simdjson On-Demand API is used to parse JSON string.
+/// Non-wildcard paths use simdjson on-demand. Wildcard paths use the DOM API
+/// (parse + at_path_with_wildcard + minify) so object/array text matches the
+/// document tape; on-demand raw_json() after wildcard can span sibling bytes.
 /// get_json_object(jsonString, path) -> value
 template <typename T>
 struct GetJsonObjectFunction {
@@ -185,6 +200,7 @@ struct GetJsonObjectFunction {
       const arg_type<Varchar>* jsonPath) {
     if (jsonPath != nullptr && checkJsonPath(*jsonPath)) {
       jsonPath_ = pathNormalizer_.normalize(*jsonPath);
+      jsonPathHasWildcard_ = detail::jsonPathContainsWildcard(jsonPath_.value());
     }
   }
 
@@ -208,18 +224,41 @@ struct GetJsonObjectFunction {
       result.append(json);
       return true;
     }
-    simdjson::ondemand::document jsonDoc;
+    const bool useWildcard = jsonPath_.has_value()
+        ? jsonPathHasWildcard_
+        : detail::jsonPathContainsWildcard(formattedJsonPath);
+
     simdjson::padded_string paddedJson(json.data(), json.size());
+
+    if (useWildcard) {
+      try {
+        thread_local simdjson::dom::parser domParser;
+        simdjson::dom::element root;
+        if (domParser.parse(paddedJson).get(root)) {
+          return false;
+        }
+        std::vector<simdjson::dom::element> matches;
+        if (root.at_path_with_wildcard(formattedJsonPath).get(matches)) {
+          return false;
+        }
+        if (matches.empty()) {
+          return false;
+        }
+        return appendWildcardDomArrayResult(matches, result);
+      } catch (simdjson::simdjson_error&) {
+        return false;
+      }
+    }
+
+    simdjson::ondemand::document jsonDoc;
     if (simdjsonParseIncomplete(paddedJson).get(jsonDoc)) {
       return false;
     }
     try {
-      // Can return error result or throw exception possibly.
       auto rawResult = jsonDoc.at_path(formattedJsonPath);
       if (rawResult.error()) {
         return false;
       }
-
       if (!extractStringResult(rawResult, result)) {
         return false;
       }
@@ -241,13 +280,38 @@ struct GetJsonObjectFunction {
     return std::string_view{jsonPath}.starts_with('$');
   }
 
+  // Spark get_json_object wildcard paths: 0 matches -> NULL; 1 match -> bare JSON
+  // (scalar, object, etc.); 2+ matches -> JSON array string, e.g. '["b","c"]' or
+  // '[{...},{...}]'. Each match is a dom::element; serialize with simdjson::minify.
+  bool appendWildcardDomArrayResult(
+      const std::vector<simdjson::dom::element>& values,
+      out_type<Varchar>& result) {
+    std::vector<std::string> pieces;
+    pieces.reserve(values.size());
+    for (const auto& el : values) {
+      pieces.push_back(simdjson::minify(el));
+    }
+    if (pieces.size() == 1) {
+      result.append(pieces[0]);
+      return true;
+    }
+    result.append("[");
+    for (size_t i = 0; i < pieces.size(); ++i) {
+      if (i > 0) {
+        result.append(",");
+      }
+      result.append(pieces[i]);
+    }
+    result.append("]");
+    return true;
+  }
+
   // Extracts a string representation from a simdjson result. Handles various
   // JSON types including numbers, booleans, strings, objects, and arrays.
   // Returns true if the conversion is successful. Otherwise, returns false.
   bool extractStringResult(
       simdjson::simdjson_result<simdjson::ondemand::value> rawResult,
       out_type<Varchar>& result) {
-    std::stringstream ss;
     switch (rawResult.type()) {
       // For number and bool types, we need to explicitly get the value
       // for specific types instead of using `ss << rawResult`. Thus, we
@@ -296,11 +360,26 @@ struct GetJsonObjectFunction {
         return false;
       }
       // For nested case, e.g., for "{"my": {"hello": 10}}",
-      // "$.my" will return an object type.
+      // "$.my" will return an object type. Use simdjson::minify on a padded
+      // copy of the raw sub-JSON so output matches Spark-style compact text
+      // (no insignificant whitespace), without a full DOM parse.
       case simdjson::ondemand::json_type::object:
       case simdjson::ondemand::json_type::array: {
-        ss << rawResult;
-        result.append(ss.str());
+        std::string_view slice;
+        if (simdjson::to_json_string(rawResult).get(slice)) {
+          return false;
+        }
+        simdjson::padded_string padded(slice.data(), slice.size());
+        std::string minified;
+        minified.resize(padded.size());
+        size_t dstLen = 0;
+        if (simdjson::minify(
+                padded.data(), padded.size(), minified.data(), dstLen) !=
+            simdjson::SUCCESS) {
+          return false;
+        }
+        minified.resize(dstLen);
+        result.append(minified);
         return true;
       }
       default:
@@ -386,6 +465,8 @@ struct GetJsonObjectFunction {
 
   // Used for constant json path.
   std::optional<std::string> jsonPath_;
+  // Set with jsonPath_ in initialize(); avoids rescanning constant paths.
+  bool jsonPathHasWildcard_{false};
 
   detail::JsonPathNormalizer pathNormalizer_;
 };

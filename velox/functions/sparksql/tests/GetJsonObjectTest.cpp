@@ -91,24 +91,24 @@ TEST_F(GetJsonObjectTest, basic) {
       getJsonObject(R"({"my": {"hello": true}})", "$.my.  hello"), "true");
   EXPECT_EQ(getJsonObject(R"({"a$ ": {"b": 10}})", "$.a$ .b"), "10");
   EXPECT_EQ(getJsonObject(R"({"a$. b": {"c": 10}})", "$.a$. b"), std::nullopt);
-  // Json object as result.
+  // Json object as result (minified to match Spark-style compact JSON).
   EXPECT_EQ(
       getJsonObject(
           R"({"my": {"info": {"name": "Alice", "age": "5", "id": "001"}}})",
           "$.my.info"),
-      R"({"name": "Alice", "age": "5", "id": "001"})");
+      R"({"name":"Alice","age":"5","id":"001"})");
   EXPECT_EQ(
       getJsonObject(
           R"({"my": {"info": {"name": "Alice", "age": "5", "id": "001"}}})",
           "$['my']['info']"),
-      R"({"name": "Alice", "age": "5", "id": "001"})");
+      R"({"name":"Alice","age":"5","id":"001"})");
 
   // Array as result.
   EXPECT_EQ(
       getJsonObject(
           R"([{"my": {"info": {"name": "Alice"}}}, {"other": ["v1", "v2"]}])",
           "$[1].other"),
-      R"(["v1", "v2"])");
+      R"(["v1","v2"])");
   // Array element as result.
   EXPECT_EQ(
       getJsonObject(
@@ -132,6 +132,39 @@ TEST_F(GetJsonObjectTest, basic) {
   EXPECT_EQ(getJsonObject(R"({"hello": "a\tb"})", "$.hello"), "a\tb");
   EXPECT_EQ(getJsonObject(R"({"hello": "\u0041"})", "$.hello"), "A");
   EXPECT_EQ(getJsonObject(R"({"hello": "\u000A"})", "$.hello"), "\n");
+}
+
+TEST_F(GetJsonObjectTest, wildcardArrayPath) {
+  // Multiple matches -> JSON array string.
+  EXPECT_EQ(
+      getJsonObject(R"([{"a":"b"},{"a":"c"}])", "$[*].a"), R"(["b","c"])");
+
+  EXPECT_EQ(
+      getJsonObject(R"([{"a":1},{"a":2}])", "$[*].a"), R"([1,2])");
+
+  EXPECT_EQ(
+      getJsonObject(
+          R"([{"f1": "value1"},{"f1": "value2"}])", "$[*].f1"),
+      R"(["value1","value2"])");
+
+  // Single match -> bare JSON (Spark: no outer [] for one element).
+  // Nested object, single array element -> bare object string.
+  EXPECT_EQ(
+      getJsonObject(
+          R"([{"f1":{"f2":"value1","f3":""},"f4":""}])",
+          "$[*].f1"),
+      R"({"f2":"value1","f3":""})");
+
+  // Nested object must not pick up sibling keys (tag_value) from the array element.
+  EXPECT_EQ(
+      getJsonObject(
+          R"([{"tag_meta":{"meta_code":2000211,"meta_value":""},"tag_value":""}])",
+          "$[*].tag_meta"),
+      R"({"meta_code":2000211,"meta_value":""})");
+
+  // 0 matches -> NULL (Spark-style).
+  EXPECT_EQ(
+      getJsonObject(R"({"items":[]})", "$.items[*].name"), std::nullopt);
 }
 
 TEST_F(GetJsonObjectTest, nullResult) {
@@ -198,7 +231,7 @@ TEST_F(GetJsonObjectTest, incompleteJson) {
       getJsonObject(
           R"({"my": {"info": {"name": "Alice", "age": "5", "id": "001"}}},)",
           "$['my']['info']"),
-      R"({"name": "Alice", "age": "5", "id": "001"})");
+      R"({"name":"Alice","age":"5","id":"001"})");
 }
 
 TEST_F(GetJsonObjectTest, number) {

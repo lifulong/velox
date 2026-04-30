@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
-#include "velox/functions/sparksql/specialforms/GetStructField.h"
 #include "velox/expression/ConstantExpr.h"
+#include "velox/expression/EvalCtx.h"
+#include "velox/functions/sparksql/specialforms/GetStructField.h"
 #include "velox/vector/ComplexVector.h"
 
 namespace facebook::velox::functions::sparksql {
@@ -33,7 +34,7 @@ class GetStructFieldFunction : public exec::VectorFunction {
   void apply(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
-      const TypePtr& /*resultType*/,
+      const TypePtr& resultType,
       exec::EvalCtx& context,
       VectorPtr& result) const override {
     exec::LocalDecodedVector decoded(context, *args[0], rows);
@@ -42,11 +43,27 @@ class GetStructFieldFunction : public exec::VectorFunction {
         ordinal_,
         rowData->childrenSize(),
         "Invalid ordinal. Should be smaller than the children size of input row vector.");
+    const VectorPtr& child = rowData->childAt(ordinal_);
+
+    VectorPtr fieldResult;
     if (decoded->isIdentityMapping()) {
-      result = rowData->childAt(ordinal_);
+      fieldResult = child;
     } else {
-      result =
-          decoded->wrap(rowData->childAt(ordinal_), *args[0], decoded->size());
+      fieldResult = decoded->wrap(child, *args[0], decoded->size());
+    }
+
+    // When `result` is already allocated (e.g. CASE/Switch reuses one output
+    // column across branches), we must merge into it. Assigning `result =
+    // child` would drop prior writes and can shrink the physical vector.
+    if (!result) {
+      result = std::move(fieldResult);
+    } else {
+      VELOX_USER_CHECK_GE(
+          fieldResult->size(),
+          rows.end(),
+          "get_struct_field: decoded field vector shorter than evaluation row span.");
+      context.ensureWritable(rows, resultType, result);
+      result->copy(fieldResult.get(), rows, nullptr);
     }
   }
 

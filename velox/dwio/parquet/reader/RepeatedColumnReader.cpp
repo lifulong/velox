@@ -302,6 +302,7 @@ void ListColumnReader::setLengthsFromRepDefs(PageReader& pageReader) {
   formatData_->as<ParquetData>().setNulls(nullsInReadRange(), numLists);
   setLengths(std::move(lengths));
 }
+
 void ListColumnReader::read(
     int64_t offset,
     const RowSet& rows,

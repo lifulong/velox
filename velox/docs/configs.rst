@@ -876,6 +876,11 @@ Each query can override the config by setting corresponding query session proper
      - integer
      - 1024
      - Batch size used when writing into Parquet through Arrow bridge.
+   * - hive.parquet.writer.enable-store-decimal-as-integer
+     - hive.parquet.writer.enable_store_decimal_as_integer
+     - bool
+     - true
+     - Whether to write compatible DECIMAL columns using integer physical types in Parquet through the Arrow bridge.
    * - hive.parquet.writer.created-by
      -
      - string

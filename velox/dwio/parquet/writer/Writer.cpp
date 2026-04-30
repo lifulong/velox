@@ -18,6 +18,7 @@
 #include <arrow/c/bridge.h>
 #include <arrow/io/interfaces.h>
 #include <arrow/table.h>
+#include <iostream>
 #include "velox/common/base/Pointers.h"
 #include "velox/common/config/Config.h"
 #include "velox/common/testutil/TestValue.h"
@@ -157,7 +158,11 @@ std::shared_ptr<WriterProperties> getArrowParquetWriterOptions(
   properties = properties->max_row_group_length(
       static_cast<int64_t>(flushPolicy->rowsInRowGroup()));
   properties = properties->codec_options(options.codecOptions);
-  properties = properties->enable_store_decimal_as_integer();
+  if (options.enableStoreDecimalAsInteger.value_or(true)) {
+    properties = properties->enable_store_decimal_as_integer();
+  } else {
+    properties = properties->disable_store_decimal_as_integer();
+  }
   if (options.useParquetDataPageV2.value_or(false)) {
     properties =
         properties->data_page_version(arrow::ParquetDataPageVersion::V2);
@@ -329,6 +334,20 @@ std::optional<bool> isParquetEnableDictionary(
         "Invalid parquet writer enable dictionary option: {}", e.what());
   }
   return std::nullopt;
+}
+
+std::optional<bool> toParquetEnableStoreDecimalAsInteger(
+    std::optional<std::string> enableStoreDecimalAsInteger) {
+  if (!enableStoreDecimalAsInteger) {
+    return std::nullopt;
+  }
+  try {
+    return folly::to<bool>(*enableStoreDecimalAsInteger);
+  } catch (const std::exception& e) {
+    VELOX_USER_FAIL(
+        "Invalid parquet writer enable store decimal as integer option: {}",
+        e.what());
+  }
 }
 
 std::optional<bool> getParquetDataPageVersion(
@@ -664,6 +683,26 @@ void WriterOptions::processConfigs(
         ? isParquetEnableDictionary(session, kParquetSessionEnableDictionary)
         : isParquetEnableDictionary(
               connectorConfig, kParquetHiveConnectorEnableDictionary);
+  }
+
+  {
+    const auto fmtOptBool = [](const std::optional<bool>& v) -> std::string {
+      return v.has_value() ? (*v ? std::string{"true"} : std::string{"false"})
+                           : std::string{"nullopt"};
+    };
+    std::cerr << "[WriterOptions::processConfigs] enableStoreDecimalAsInteger "
+                 "before_if="
+              << fmtOptBool(enableStoreDecimalAsInteger) << std::endl;
+
+    if (!enableStoreDecimalAsInteger) {
+      enableStoreDecimalAsInteger = toParquetEnableStoreDecimalAsInteger(
+          session.getWithFallback<std::string>(
+              kParquetEnableStoreDecimalAsInteger, connectorConfig));
+    }
+
+    std::cerr << "[WriterOptions::processConfigs] enableStoreDecimalAsInteger "
+                 "after_if="
+              << fmtOptBool(enableStoreDecimalAsInteger) << std::endl;
   }
 
   if (!dictionaryPageSizeLimit) {

@@ -15,6 +15,8 @@
  */
 
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/base/BitUtil.h"
+#include "velox/vector/BaseVector.h"
 #include "velox/dwio/common/Mutation.h"
 #include "velox/dwio/parquet/tests/ParquetTestBase.h"
 #include "velox/expression/ExprToSubfieldFilter.h"
@@ -2111,3 +2113,83 @@ INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<FloatToDoubleTestParam>& info) {
       return info.param.toString();
     });
+
+// Regression: after setLengthsFromRepDefs, nullsInReadRange_->size() must equal
+// bits::nbytes(numLists).  Without the fix, ensureCapacity leaves the size from
+// a previous larger allocation; callers that rely on size() as the valid-bit
+// boundary (e.g. Buffer::slice in Gluten) then read past the intended range.
+//
+// Setup: RG1 has kLarge rows → allocates a large null buffer.
+//        RG2 has kSmall rows → ensureCapacity skips realloc (capacity is
+//        sufficient), so without the fix the size stays at the RG1 value.
+// Each batch uses a fresh result vector so setComplexNulls always takes the
+// setNulls(nullsInReadRange_) path, making nullsInReadRange_->size() visible
+// as the null buffer on the result ArrayVector.
+TEST_F(ParquetReaderTest, listNullBufferSizeAcrossRowGroups) {
+  constexpr int32_t kLarge = 4096;
+  constexpr int32_t kSmall = 100;
+  const auto rowType = ROW({"a"}, {ARRAY(INTEGER())});
+
+  // Write two row groups of different sizes.
+  auto sink = std::make_unique<MemorySink>(
+      4 * 1024 * 1024, FileSink::Options{.pool = leafPool_.get()});
+  auto* sinkPtr = sink.get();
+
+  WriterOptions opts;
+  opts.memoryPool = rootPool_.get();
+  opts.flushPolicyFactory = [&]() {
+    return std::make_unique<DefaultFlushPolicy>(kLarge, 128LL << 30);
+  };
+  auto writer = std::make_unique<facebook::velox::parquet::Writer>(
+      std::move(sink), opts, rootPool_, rowType);
+
+  auto makeBatch = [&](int32_t numRows) {
+    return makeRowVector(
+        {"a"},
+        {makeArrayVector<int32_t>(
+            numRows,
+            [](vector_size_t /*row*/) { return 2; },
+            [](vector_size_t row, vector_size_t idx) {
+              return static_cast<int32_t>(row * 2 + idx);
+            })});
+  };
+  writer->write(makeBatch(kLarge)); // → RG1
+  writer->write(makeBatch(kSmall)); // → RG2 (after flush)
+  writer->close();
+
+  // Read back and check null-buffer size invariant for each batch.
+  ReaderOptions readerOpts{leafPool_.get()};
+  std::string data(sinkPtr->data(), sinkPtr->size());
+  auto file = std::make_shared<InMemoryReadFile>(std::move(data));
+  auto buf =
+      std::make_unique<BufferedInput>(file, readerOpts.memoryPool());
+  auto reader =
+      std::make_unique<ParquetReader>(std::move(buf), readerOpts);
+
+  auto rowReaderOpts = getReaderOpts(rowType);
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  int32_t totalRows = 0;
+  while (true) {
+    // Fresh result per batch forces setComplexNulls → setNulls(nullsInReadRange_),
+    // making the buffer's size() directly observable on the result ArrayVector.
+    VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+    auto numRead = rowReader->next(kLarge, result);
+    if (numRead == 0) {
+      break;
+    }
+    totalRows += static_cast<int32_t>(numRead);
+
+    const VectorPtr& column = BaseVector::loadedVectorShared(
+        result->asUnchecked<RowVector>()->childAt(0));
+    auto* arr = column->asUnchecked<ArrayVector>();
+    if (arr->nulls()) {
+      // The null buffer must be sized for exactly numRead bits.
+      // Without the fix this fails for the kSmall batch because the buffer
+      // retains the larger size from the kLarge allocation.
+      EXPECT_EQ(arr->nulls()->size(), bits::nbytes(numRead));
+    }
+  }
+  EXPECT_EQ(totalRows, kLarge + kSmall);
+}

@@ -114,6 +114,13 @@ struct WriterOptions : public dwio::common::WriterOptions {
   std::optional<bool> enableDictionary;
   std::optional<bool> useParquetDataPageV2;
   std::optional<std::string> createdBy;
+  /// Controls how DECIMAL values are stored by the Writer.
+  /// - If unset, the Writer defaults to storing as integer (true),
+  /// using INT32/INT64 for short DECIMAL precisions; higher precisions are
+  /// stored as FIXED_LEN_BYTE_ARRAY.
+  /// - If set to false, DECIMAL values are stored as FIXED_LEN_BYTE_ARRAY,
+  /// regardless of precision.
+  std::optional<bool> enableStoreDecimalAsInteger;
 
   std::shared_ptr<arrow::MemoryPool> arrowMemoryPool;
 
@@ -153,6 +160,8 @@ struct WriterOptions : public dwio::common::WriterOptions {
       "hive.parquet.writer.batch-size";
   static constexpr const char* kParquetHiveConnectorCreatedBy =
       "hive.parquet.writer.created-by";
+  static constexpr const char* kParquetEnableStoreDecimalAsInteger =
+      "hive.parquet.writer.enable_store_decimal_as_integer";
 
   // Serde parameter keys for timestamp settings. These can be set via
   // serdeParameters map to override the default timestamp behavior.

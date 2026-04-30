@@ -731,6 +731,44 @@ TEST_F(E2EFilterTest, writeDecimalAsInteger) {
   EXPECT_EQ(c2->parquetType_.value(), thrift::Type::type::FIXED_LEN_BYTE_ARRAY);
 }
 
+// With enable_store_decimal_as_integer off, all precisions use
+// FIXED_LEN_BYTE_ARRAY
+TEST_F(E2EFilterTest, writeDecimalAsFixedLenByteArray) {
+  options_.enableStoreDecimalAsInteger = false;
+
+  auto rowVector = makeRowVector(
+      {makeFlatVector<int64_t>({1, 2}, DECIMAL(8, 2)),
+       makeFlatVector<int64_t>({1, 2}, DECIMAL(10, 2)),
+       makeFlatVector<int128_t>({1, 2}, DECIMAL(19, 2))});
+  writeToMemory(rowVector->type(), {rowVector}, false);
+
+  dwio::common::ReaderOptions readerOpts{
+      leafPool_.get(), dataIoStats_.get(), metadataIoStats_.get()};
+  auto input = std::make_unique<BufferedInput>(
+      std::make_shared<InMemoryReadFile>(sinkData_), readerOpts.memoryPool());
+  auto reader = makeReader(readerOpts, std::move(input));
+  auto parquetReader = dynamic_cast<ParquetReader&>(*reader.get());
+
+  const auto& types = parquetReader.typeWithId()->getChildren();
+  ASSERT_EQ(types.size(), 3);
+
+  auto expectFixedLengthByteArrayDecimal =
+      [&](size_t columnIndex, int32_t expectedTypeLength) {
+        auto col = std::dynamic_pointer_cast<const ParquetTypeWithId>(
+            types[columnIndex]);
+        ASSERT_NE(col, nullptr);
+        ASSERT_TRUE(col->parquetType_.has_value());
+        EXPECT_EQ(
+            col->parquetType_.value(),
+            thrift::Type::type::FIXED_LEN_BYTE_ARRAY);
+        EXPECT_EQ(col->typeLength_, expectedTypeLength);
+      };
+
+  expectFixedLengthByteArrayDecimal(0, 4);
+  expectFixedLengthByteArrayDecimal(1, 5);
+  expectFixedLengthByteArrayDecimal(2, 9);
+}
+
 TEST_F(E2EFilterTest, configurableWriteSchema) {
   auto test = [&](auto& type, auto& newType) {
     std::vector<RowVectorPtr> batches;

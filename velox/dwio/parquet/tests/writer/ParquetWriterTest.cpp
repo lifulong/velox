@@ -661,6 +661,42 @@ TEST_F(ParquetWriterTest, updateWriterOptionsFromHiveConfig) {
       TimestampPrecision::kMilliseconds);
 }
 
+TEST_F(ParquetWriterTest, updateWriterOptionsFromHiveConfig) {
+    std::unordered_map<std::string, std::string> configFromFile = {
+        {config::ConfigBase::toConfigKey(
+             parquet::WriterOptions::kParquetWriteTimestampUnit),
+         "3"}};
+    const config::ConfigBase connectorConfig(std::move(configFromFile));
+    const config::ConfigBase connectorSessionProperties({});
+  
+    parquet::WriterOptions options;
+    options.compressionKind = facebook::velox::common::CompressionKind_ZLIB;
+  
+    options.processConfigs(connectorConfig, connectorSessionProperties);
+  
+    ASSERT_EQ(
+        options.parquetWriteTimestampUnit.value(),
+        TimestampPrecision::kMilliseconds);
+}
+
+TEST_F(ParquetWriterTest, enableStoreDecimalAsIntegerFromConfig) {
+  const config::ConfigBase emptyConnector({});
+
+  auto expectFromSession = [&](const char* value, bool expected) {
+    const config::ConfigBase session(
+        std::unordered_map<std::string, std::string>{
+            {parquet::WriterOptions::kParquetEnableStoreDecimalAsInteger,
+             value}});
+    parquet::WriterOptions options;
+    options.processConfigs(emptyConnector, session);
+    ASSERT_TRUE(options.enableStoreDecimalAsInteger.has_value());
+    ASSERT_EQ(options.enableStoreDecimalAsInteger.value(), expected);
+  };
+
+  expectFromSession("true", true);
+  expectFromSession("false", false);
+}
+
 #ifdef VELOX_ENABLE_PARQUET
 DEBUG_ONLY_TEST_F(ParquetWriterTest, timestampUnitAndTimeZone) {
   SCOPED_TESTVALUE_SET(
