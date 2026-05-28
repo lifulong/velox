@@ -73,6 +73,10 @@ int64_t RowGroupWriter::total_compressed_bytes_written() const {
   return contents_->total_compressed_bytes_written();
 }
 
+RowGroupWriter::BufferedStats RowGroupWriter::estimated_buffered_stats() const {
+  return contents_->estimated_buffered_stats();
+}
+
 bool RowGroupWriter::buffered() const {
   return contents_->buffered();
 }
@@ -269,6 +273,24 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
     return total_compressed_bytes_written;
   }
 
+  RowGroupWriter::BufferedStats estimated_buffered_stats() const override {
+    RowGroupWriter::BufferedStats stats;
+    if (closed_) {
+      return stats;
+    }
+    for (const auto& column_writer : column_writers_) {
+      if (column_writer) {
+        stats.def_level_bytes +=
+            column_writer->estimated_buffered_def_level_bytes();
+        stats.rep_level_bytes +=
+            column_writer->estimated_buffered_rep_level_bytes();
+        stats.value_bytes += column_writer->estimated_buffered_value_bytes();
+        stats.dict_bytes += column_writer->estimated_buffered_dict_bytes();
+      }
+    }
+    return stats;
+  }
+
   bool buffered() const override {
     return buffered_row_group_;
   }
@@ -426,11 +448,7 @@ class FileSerializer : public ParquetFileWriter::Contents {
       // If any functions here raise an exception, we set is_open_ to be false
       // so that this does not get called again (possibly causing segfault)
       is_open_ = false;
-      if (row_group_writer_) {
-        num_rows_ += row_group_writer_->num_rows();
-        row_group_writer_->Close();
-      }
-      row_group_writer_.reset();
+      FinishRowGroup();
 
       WritePageIndex();
 
@@ -463,10 +481,16 @@ class FileSerializer : public ParquetFileWriter::Contents {
     return properties_;
   }
 
-  RowGroupWriter* AppendRowGroup(bool buffered_row_group) {
+  void FinishRowGroup() override {
     if (row_group_writer_) {
+      num_rows_ += row_group_writer_->num_rows();
       row_group_writer_->Close();
+      row_group_writer_.reset();
     }
+  }
+
+  RowGroupWriter* AppendRowGroup(bool buffered_row_group) {
+    FinishRowGroup();
     num_row_groups_++;
     auto rg_metadata = metadata_->AppendRowGroup();
     if (page_index_builder_) {
@@ -762,6 +786,12 @@ RowGroupWriter* ParquetFileWriter::AppendRowGroup() {
 
 RowGroupWriter* ParquetFileWriter::AppendBufferedRowGroup() {
   return contents_->AppendBufferedRowGroup();
+}
+
+void ParquetFileWriter::FinishRowGroup() {
+  if (contents_) {
+    contents_->FinishRowGroup();
+  }
 }
 
 RowGroupWriter* ParquetFileWriter::AppendRowGroup(int64_t num_rows) {

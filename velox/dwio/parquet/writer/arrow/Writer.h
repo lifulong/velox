@@ -152,6 +152,15 @@ class PARQUET_EXPORT FileWriter {
   virtual ::arrow::Status WriteRecordBatch(
       const ::arrow::RecordBatch& batch) = 0;
 
+  /// \brief Estimated buffered bytes in the current row group. Including page
+  /// data and buffered data that are not yet written to pages.
+  virtual int64_t CurrentRowGroupBufferedBytes() const = 0;
+
+  /// \brief Finalize the current buffered row group, if any, so that its
+  /// pages and column metadata are serialized to the underlying sink. After
+  /// this call there is no active row group.
+  virtual ::arrow::Status FinishRowGroup() = 0;
+
   /// \brief Write the footer and close the file.
   virtual ::arrow::Status Close() = 0;
   virtual ~FileWriter();

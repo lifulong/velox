@@ -348,10 +348,16 @@ class FileWriterImpl : public FileWriter {
     if (!closed_) {
       // Make idempotent
       closed_ = true;
-      if (row_group_writer_ != nullptr) {
-        PARQUET_CATCH_NOT_OK(row_group_writer_->Close());
-      }
+      PARQUET_CATCH_NOT_OK(FinishRowGroup());
       PARQUET_CATCH_NOT_OK(writer_->Close());
+    }
+    return Status::OK();
+  }
+
+  Status FinishRowGroup() override {
+    if (row_group_writer_ != nullptr) {
+      PARQUET_CATCH_NOT_OK(row_group_writer_->Close());
+      row_group_writer_ = nullptr;
     }
     return Status::OK();
   }
@@ -501,12 +507,24 @@ class FileWriterImpl : public FileWriter {
       offset += batch_size;
 
       // Flush current row group if it is full.
-      if (row_group_writer_->num_rows() >= max_row_group_length) {
+      if (row_group_writer_->num_rows() >= max_row_group_length &&
+          // Avoid leaving an empty row group at the end of the file.
+          offset < batch.num_rows()) {
         RETURN_NOT_OK(NewBufferedRowGroup());
       }
     }
 
     return Status::OK();
+  }
+
+  int64_t CurrentRowGroupBufferedBytes() const override {
+    if (row_group_writer_ == nullptr) {
+      return 0;
+    }
+    auto stats = row_group_writer_->estimated_buffered_stats();
+    return stats.def_level_bytes + stats.rep_level_bytes + stats.value_bytes +
+        stats.dict_bytes + row_group_writer_->total_compressed_bytes() +
+        row_group_writer_->total_compressed_bytes_written();
   }
 
   const WriterProperties& properties() const {
